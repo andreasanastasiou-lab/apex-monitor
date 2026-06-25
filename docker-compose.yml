@@ -1,0 +1,25 @@
+version: "3.9"
+
+services:
+  influxdb:
+    image: influxdb:2.7
+    ports:
+      - "127.0.0.1:8086:8086"   # localhost only — not exposed publicly
+    volumes:
+      - influxdb_data:/var/lib/influxdb2
+    env_file:
+      - backend/.env
+
+  backend:
+    build: ./backend
+    ports:
+      - "127.0.0.1:8000:8000"   # localhost only — not exposed publicly
+    depends_on:
+      - influxdb
+    env_file:
+      - backend/.env
+    volumes:
+      - ./backend:/app
+
+volumes:
+  influxdb_data:

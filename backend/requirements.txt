@@ -1,0 +1,10 @@
+fastapi
+uvicorn
+influxdb-client
+apscheduler
+pysnmp
+netmiko
+scapy
+requests
+pyyaml
+python-dotenv
