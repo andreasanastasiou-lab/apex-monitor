@@ -42,6 +42,26 @@ def write_metric(measurement: str, tags: dict, fields: dict) -> bool:
         return False
 
 
+def run_query(flux: str) -> list[dict]:
+    """Execute a Flux query and return each record as a plain dict.
+
+    Returns an empty list (never raises) so callers can handle missing data
+    without guarding against DB failures.
+    """
+    try:
+        client = get_client()
+        query_api = client.query_api()
+        tables = query_api.query(flux, org=os.environ.get("INFLUXDB_ORG", ""))
+        rows = []
+        for table in tables:
+            for record in table.records:
+                rows.append(record.values)
+        return rows
+    except Exception as e:
+        logger.error("InfluxDB run_query failed: %s", e)
+        return []
+
+
 def test_connection() -> bool:
     try:
         return get_client().ping()
