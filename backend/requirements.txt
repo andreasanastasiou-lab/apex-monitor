@@ -10,3 +10,6 @@ scapy
 requests
 pyyaml
 python-dotenv
+scikit-learn
+pandas
+numpy

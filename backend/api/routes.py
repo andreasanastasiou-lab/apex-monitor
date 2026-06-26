@@ -3,6 +3,7 @@ from concurrent.futures import ThreadPoolExecutor
 
 from fastapi import APIRouter, HTTPException, Query
 
+from ai.anomaly import get_anomaly_status
 from config import load_config
 from db.influx import run_query
 from monitors.icmp import ping_device
@@ -171,3 +172,38 @@ from(bucket: "{bucket}")
         "avg_latency_ms": avg_latency_ms,
         "health_score": health_score,
     }
+
+
+@router.get("/anomalies")
+def get_anomalies():
+    bucket = os.environ.get("INFLUXDB_BUCKET", "")
+
+    # We only write to the "anomaly" measurement when is_anomaly is True,
+    # so every row here is a confirmed anomaly event.
+    flux = f"""
+from(bucket: "{bucket}")
+  |> range(start: -24h)
+  |> filter(fn: (r) => r._measurement == "anomaly")
+  |> pivot(rowKey: ["_time"], columnKey: ["_field"], valueColumn: "_value")
+  |> sort(columns: ["_time"], desc: true)
+"""
+    rows = run_query(flux)
+    return [
+        {
+            "device": r.get("device", "unknown"),
+            "metric": r.get("metric", ""),
+            "value": r.get("value"),
+            "confidence": r.get("confidence"),
+            "timestamp": str(r.get("_time", "")),
+        }
+        for r in rows
+    ]
+
+
+@router.get("/devices/{device_id}/anomaly-status")
+def get_device_anomaly_status(device_id: str):
+    devices = load_config().get("devices", [])
+    if not any(d["name"] == device_id for d in devices):
+        raise HTTPException(status_code=404, detail="Device not found")
+
+    return get_anomaly_status(device_id)

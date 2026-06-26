@@ -12,6 +12,9 @@ frontend/.env
 # Config with secrets
 backend/config.yaml
 
+# Trained ML models — never commit
+backend/models/*.pkl
+
 # OS
 .DS_Store
 Thumbs.db
