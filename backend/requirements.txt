@@ -4,6 +4,8 @@ influxdb-client
 apscheduler
 pysnmp
 netmiko
+paramiko
+icmplib
 scapy
 requests
 pyyaml
