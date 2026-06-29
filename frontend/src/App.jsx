@@ -2,13 +2,14 @@ import React, { useState } from 'react'
 import AIInsights from './components/AIInsights'
 import AlertBanner from './components/AlertBanner'
 import Dashboard from './components/Dashboard'
+import DeviceInventory from './components/DeviceInventory'
 import Login from './components/Login'
 import { AuthProvider, useAuth } from './context/AuthContext'
 
-const TABS = ['Dashboard', 'AI Insights']
-
 function AuthenticatedApp() {
   const { user, logout } = useAuth()
+  const isAdmin = user?.role === 'admin'
+  const TABS = ['Dashboard', 'AI Insights', ...(isAdmin ? ['Devices'] : [])]
   const [activeTab, setActiveTab] = useState('Dashboard')
 
   return (
@@ -51,7 +52,9 @@ function AuthenticatedApp() {
         </div>
       </nav>
 
-      {activeTab === 'Dashboard' ? <Dashboard /> : <AIInsights />}
+      {activeTab === 'Dashboard' && <Dashboard />}
+      {activeTab === 'AI Insights' && <AIInsights />}
+      {activeTab === 'Devices' && <DeviceInventory />}
     </div>
   )
 }

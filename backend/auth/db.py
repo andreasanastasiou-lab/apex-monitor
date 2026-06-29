@@ -1,3 +1,4 @@
+import json
 import logging
 import os
 import secrets
@@ -44,6 +45,23 @@ def init_db() -> None:
                 ip_address  TEXT,
                 timestamp   TEXT,
                 success     INTEGER
+            )
+        """)
+        db.execute("""
+            CREATE TABLE IF NOT EXISTS devices (
+                id          INTEGER PRIMARY KEY AUTOINCREMENT,
+                name        TEXT UNIQUE NOT NULL,
+                ip          TEXT NOT NULL,
+                type        TEXT NOT NULL,
+                group_name  TEXT,
+                location    TEXT,
+                owner       TEXT,
+                notes       TEXT,
+                monitors    TEXT,
+                ports       TEXT,
+                is_active   INTEGER DEFAULT 1,
+                created_at  TEXT,
+                updated_at  TEXT
             )
         """)
 
@@ -163,6 +181,124 @@ def deactivate_user(username: str) -> bool:
         ).rowcount
     return affected > 0
 
+
+# ── Device inventory ─────────────────────────────────────────────────────────
+
+def _parse_device_row(row) -> dict:
+    d = dict(row)
+    for field in ("monitors", "ports"):
+        val = d.get(field)
+        if val:
+            try:
+                d[field] = json.loads(val)
+            except (json.JSONDecodeError, TypeError):
+                d[field] = []
+        else:
+            d[field] = []
+    return d
+
+
+def get_all_devices() -> list:
+    with _conn() as db:
+        rows = db.execute(
+            "SELECT * FROM devices WHERE is_active = 1 ORDER BY name"
+        ).fetchall()
+    return [_parse_device_row(r) for r in rows]
+
+
+def get_device(name: str) -> Optional[dict]:
+    with _conn() as db:
+        row = db.execute(
+            "SELECT * FROM devices WHERE name = ? AND is_active = 1", (name,)
+        ).fetchone()
+    return _parse_device_row(row) if row else None
+
+
+def add_device(device: dict) -> bool:
+    required = {"name", "ip", "type"}
+    if not required.issubset(device):
+        return False
+    now = datetime.utcnow().isoformat()
+    try:
+        with _conn() as db:
+            db.execute(
+                """INSERT INTO devices
+                   (name, ip, type, group_name, location, owner, notes,
+                    monitors, ports, created_at, updated_at)
+                   VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)""",
+                (
+                    device["name"], device["ip"], device["type"],
+                    device.get("group_name"), device.get("location"),
+                    device.get("owner"), device.get("notes"),
+                    json.dumps(device.get("monitors", [])),
+                    json.dumps(device.get("ports", [])),
+                    now, now,
+                ),
+            )
+        return True
+    except sqlite3.IntegrityError:
+        return False
+
+
+_DEVICE_UPDATABLE = {"ip", "type", "group_name", "location", "owner", "notes", "monitors", "ports"}
+
+
+def update_device(name: str, updates: dict) -> bool:
+    if not get_device(name):
+        return False
+    fields = {k: v for k, v in updates.items() if k in _DEVICE_UPDATABLE}
+    if not fields:
+        return True
+    for f in ("monitors", "ports"):
+        if f in fields and isinstance(fields[f], list):
+            fields[f] = json.dumps(fields[f])
+    fields["updated_at"] = datetime.utcnow().isoformat()
+    set_clause = ", ".join(f"{k} = ?" for k in fields)
+    with _conn() as db:
+        affected = db.execute(
+            f"UPDATE devices SET {set_clause} WHERE name = ? AND is_active = 1",
+            list(fields.values()) + [name],
+        ).rowcount
+    return affected > 0
+
+
+def delete_device(name: str) -> bool:
+    with _conn() as db:
+        affected = db.execute(
+            "UPDATE devices SET is_active = 0, updated_at = ? WHERE name = ? AND is_active = 1",
+            (datetime.utcnow().isoformat(), name),
+        ).rowcount
+    return affected > 0
+
+
+def migrate_from_config(config_path: str) -> int:
+    import yaml as _yaml
+    try:
+        with open(config_path, "r", encoding="utf-8") as f:
+            cfg = _yaml.safe_load(f) or {}
+    except FileNotFoundError:
+        return 0
+    count = 0
+    for device in cfg.get("devices", []):
+        if not device.get("ip"):
+            continue
+        d = {
+            "name": device.get("name", device["ip"]),
+            "ip": device["ip"],
+            "type": device.get("type", "workstation"),
+            "group_name": device.get("group_name"),
+            "location": device.get("location"),
+            "owner": device.get("owner"),
+            "notes": device.get("notes"),
+            "monitors": device.get("monitors", []),
+            "ports": device.get("ports", []),
+        }
+        if add_device(d):
+            count += 1
+    return count
+
+
+# ── User management ───────────────────────────────────────────────────────────
 
 def create_default_admin() -> None:
     if list_users():
