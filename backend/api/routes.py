@@ -3,15 +3,20 @@ import os
 from concurrent.futures import ThreadPoolExecutor
 from datetime import datetime, timedelta
 
-from fastapi import APIRouter, HTTPException, Query, Response
+from fastapi import APIRouter, Depends, HTTPException, Query, Response
 
 from ai.anomaly import get_anomaly_status
 from alerts.engine import alert_engine
+from auth.middleware import require_auth
 from config import load_config
 from db.influx import run_query
 from monitors.icmp import ping_device
 
+# Public router — no authentication required.
 router = APIRouter()
+
+# Protected router — every route requires a valid JWT.
+_protected = APIRouter(dependencies=[Depends(require_auth)])
 
 # Validated whitelist for query parameters that flow into Flux query strings.
 _ALLOWED_METRICS = {"latency_ms", "packet_loss_pct", "is_alive"}
@@ -360,7 +365,7 @@ def health():
     return {"status": "ok"}
 
 
-@router.get("/devices")
+@_protected.get("/devices")
 def get_devices():
     devices = load_config().get("devices", [])
 
@@ -393,7 +398,7 @@ def get_devices():
     return results
 
 
-@router.get("/devices/{device_id}/metrics")
+@_protected.get("/devices/{device_id}/metrics")
 def get_device_metrics(
     device_id: str,
     metric: str = Query(default="latency_ms"),
@@ -430,7 +435,7 @@ from(bucket: "{bucket}")
     return [{"timestamp": str(r.get("_time", "")), "value": r.get("_value")} for r in rows]
 
 
-@router.get("/alerts")
+@_protected.get("/alerts")
 def get_alerts():
     bucket = os.environ.get("INFLUXDB_BUCKET", "")
 
@@ -468,7 +473,7 @@ union(tables: [alive_alerts, port_alerts])
     return results
 
 
-@router.get("/summary")
+@_protected.get("/summary")
 def get_summary():
     total_devices = len(load_config().get("devices", []))
     bucket = os.environ.get("INFLUXDB_BUCKET", "")
@@ -511,7 +516,7 @@ from(bucket: "{bucket}")
     }
 
 
-@router.get("/anomalies")
+@_protected.get("/anomalies")
 def get_anomalies():
     bucket = os.environ.get("INFLUXDB_BUCKET", "")
 
@@ -537,7 +542,7 @@ from(bucket: "{bucket}")
     ]
 
 
-@router.get("/devices/{device_id}/anomaly-status")
+@_protected.get("/devices/{device_id}/anomaly-status")
 def get_device_anomaly_status(device_id: str):
     devices = load_config().get("devices", [])
     if not any(d["name"] == device_id for d in devices):
@@ -546,22 +551,22 @@ def get_device_anomaly_status(device_id: str):
     return get_anomaly_status(device_id)
 
 
-@router.get("/notifications")
+@_protected.get("/notifications")
 def get_notifications(unread_only: bool = Query(default=False)):
     return [_alert_to_dict(a) for a in alert_engine.get_alerts(unread_only=unread_only)]
 
 
-@router.post("/notifications/{alert_id}/read")
+@_protected.post("/notifications/{alert_id}/read")
 def mark_notification_read(alert_id: str):
     return {"success": alert_engine.mark_read(alert_id)}
 
 
-@router.post("/notifications/read-all")
+@_protected.post("/notifications/read-all")
 def mark_all_notifications_read():
     return {"success": alert_engine.mark_all_read()}
 
 
-@router.get("/notifications/count")
+@_protected.get("/notifications/count")
 def get_notification_count():
     return {
         "unread": alert_engine.get_unread_count(),
@@ -573,7 +578,7 @@ def get_notification_count():
 # /diagnostic/correlation must be registered before /diagnostic/{device_id}
 # so FastAPI doesn't match the literal segment "correlation" as a device_id.
 
-@router.get("/diagnostic/correlation")
+@_protected.get("/diagnostic/correlation")
 def get_diagnostic_correlation(
     time_range: str = Query(default="6h", alias="range"),
 ):
@@ -611,7 +616,7 @@ from(bucket: "{bucket}")
     return {"range": time_range, "devices": results}
 
 
-@router.get("/diagnostic/{device_id}/report")
+@_protected.get("/diagnostic/{device_id}/report")
 def get_diagnostic_report(
     device_id: str,
     time_range: str = Query(default="6h", alias="range"),
@@ -638,7 +643,7 @@ def get_diagnostic_report(
     )
 
 
-@router.get("/diagnostic/{device_id}")
+@_protected.get("/diagnostic/{device_id}")
 def get_diagnostic(
     device_id: str,
     time_range: str = Query(default="6h", alias="range"),
@@ -654,3 +659,8 @@ def get_diagnostic(
         raise HTTPException(status_code=404, detail="Device not found")
 
     return _get_diagnostic_data(device, device_id, time_range)
+
+
+# Merge all protected routes into the public router so main.py only
+# needs to include_router(router) once.
+router.include_router(_protected)
