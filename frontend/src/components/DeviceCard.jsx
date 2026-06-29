@@ -7,7 +7,7 @@ const STATUS = {
   DOWN:    { badge: 'bg-red-500/20 text-red-400 border border-red-600/40', dot: 'bg-red-400' },
 }
 
-export default function DeviceCard({ device }) {
+export default function DeviceCard({ device, onInvestigate = () => {} }) {
   const [open, setOpen] = useState(false)
   const [metrics, setMetrics] = useState([])
   const [loading, setLoading] = useState(false)
@@ -49,7 +49,15 @@ export default function DeviceCard({ device }) {
       {/* Footer row */}
       <div className="flex items-center justify-between mt-3 text-xs text-gray-400">
         <span className="capitalize">{device.type}</span>
-        <span>{device.latency_ms != null ? `${device.latency_ms} ms` : '—'}</span>
+        <div className="flex items-center gap-2">
+          <span>{device.latency_ms != null ? `${device.latency_ms} ms` : '—'}</span>
+          <button
+            onClick={(e) => { e.stopPropagation(); onInvestigate(device) }}
+            className="px-2 py-0.5 text-xs text-blue-400 border border-blue-600/40 rounded hover:bg-blue-900/30 transition-colors"
+          >
+            Investigate
+          </button>
+        </div>
       </div>
 
       {/* Expandable metrics panel */}

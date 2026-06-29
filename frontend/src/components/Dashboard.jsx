@@ -1,6 +1,7 @@
 import axios from 'axios'
 import React, { useEffect, useState } from 'react'
 import DeviceCard from './DeviceCard'
+import DiagnosticView from './DiagnosticView'
 import NotificationPanel from './NotificationPanel'
 
 function StatCard({ label, value, cls }) {
@@ -34,8 +35,9 @@ export default function Dashboard() {
   const [loading, setLoading]           = useState(true)
   const [error, setError]               = useState(null)
   const [lastRefresh, setLastRefresh]   = useState(null)
-  const [unreadCount, setUnreadCount]   = useState(0)
-  const [panelOpen, setPanelOpen]       = useState(false)
+  const [unreadCount, setUnreadCount]         = useState(0)
+  const [panelOpen, setPanelOpen]             = useState(false)
+  const [investigatingDevice, setInvestigating] = useState(null)
 
   useEffect(() => {
     const load = async () => {
@@ -75,6 +77,9 @@ export default function Dashboard() {
   return (
     <div className="max-w-7xl mx-auto px-4 sm:px-6 py-6">
       <NotificationPanel isOpen={panelOpen} onClose={() => setPanelOpen(false)} />
+      {investigatingDevice && (
+        <DiagnosticView device={investigatingDevice} onClose={() => setInvestigating(null)} />
+      )}
 
       {/* Header */}
       <header className="flex items-center justify-between mb-8">
@@ -135,7 +140,7 @@ export default function Dashboard() {
       ) : (
         <div className="grid grid-cols-1 sm:grid-cols-2 lg:grid-cols-3 xl:grid-cols-4 gap-4">
           {devices.map((device) => (
-            <DeviceCard key={device.id} device={device} />
+            <DeviceCard key={device.id} device={device} onInvestigate={setInvestigating} />
           ))}
         </div>
       )}

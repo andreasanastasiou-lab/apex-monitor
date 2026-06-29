@@ -1,7 +1,9 @@
+import html as _html
 import os
 from concurrent.futures import ThreadPoolExecutor
+from datetime import datetime, timedelta
 
-from fastapi import APIRouter, HTTPException, Query
+from fastapi import APIRouter, HTTPException, Query, Response
 
 from ai.anomaly import get_anomaly_status
 from alerts.engine import alert_engine
@@ -17,6 +19,327 @@ _ALLOWED_RANGES = {"1h", "6h", "24h", "7d"}
 
 # Latency above this threshold (ms) on a reachable host reports WARNING.
 _LATENCY_WARNING_MS = 100.0
+
+_RANGE_DELTAS = {
+    "1h": timedelta(hours=1),
+    "6h": timedelta(hours=6),
+    "24h": timedelta(hours=24),
+    "7d": timedelta(days=7),
+}
+
+_REPORT_CSS = """
+* { box-sizing: border-box; margin: 0; padding: 0; }
+body { background: #0f172a; color: #e2e8f0; font-family: system-ui, -apple-system, sans-serif; font-size: 14px; line-height: 1.6; }
+.page { max-width: 960px; margin: 0 auto; padding: 40px 24px; }
+h1 { font-size: 22px; font-weight: 700; color: #f8fafc; }
+h2 { font-size: 11px; font-weight: 600; text-transform: uppercase; letter-spacing: 0.08em; color: #64748b; margin: 32px 0 12px; }
+header { border-bottom: 1px solid #1e293b; padding-bottom: 20px; margin-bottom: 4px; }
+.meta { color: #64748b; font-size: 12px; margin-top: 6px; }
+.stat-grid { display: grid; grid-template-columns: repeat(3, 1fr); gap: 10px; }
+.stat { background: #1e293b; border-radius: 6px; padding: 12px 16px; }
+.stat-label { font-size: 11px; color: #64748b; text-transform: uppercase; letter-spacing: 0.05em; }
+.stat-value { font-size: 22px; font-weight: 700; color: #f1f5f9; margin-top: 2px; }
+table { width: 100%; border-collapse: collapse; font-size: 13px; }
+th { text-align: left; padding: 8px 12px; background: #1e293b; color: #94a3b8; font-weight: 600; font-size: 11px; text-transform: uppercase; letter-spacing: 0.05em; }
+td { padding: 8px 12px; border-bottom: 1px solid #1e293b; color: #cbd5e1; }
+tr:last-child td { border-bottom: none; }
+.card { background: #1e293b; border-radius: 8px; margin-bottom: 4px; overflow: hidden; }
+.badge { display: inline-block; padding: 2px 8px; border-radius: 9999px; font-size: 11px; font-weight: 600; }
+.badge-red { background: rgba(239,68,68,.15); color: #f87171; }
+.badge-yellow { background: rgba(234,179,8,.15); color: #fbbf24; }
+.badge-green { background: rgba(34,197,94,.15); color: #4ade80; }
+.mono { font-family: 'Courier New', monospace; font-size: 12px; }
+footer { margin-top: 48px; padding-top: 16px; border-top: 1px solid #1e293b; color: #475569; font-size: 11px; text-align: center; }
+"""
+
+
+def _get_diagnostic_data(device: dict, device_id: str, time_range: str) -> dict:
+    host = device["ip"]
+    bucket = os.environ.get("INFLUXDB_BUCKET", "")
+
+    def _q_latency():
+        return run_query(f"""
+from(bucket: "{bucket}")
+  |> range(start: -{time_range})
+  |> filter(fn: (r) => r._measurement == "icmp")
+  |> filter(fn: (r) => r["host"] == "{host}")
+  |> filter(fn: (r) => r._field == "latency_ms")
+  |> keep(columns: ["_time", "_value"])
+  |> sort(columns: ["_time"])
+""")
+
+    def _q_packet_loss():
+        return run_query(f"""
+from(bucket: "{bucket}")
+  |> range(start: -{time_range})
+  |> filter(fn: (r) => r._measurement == "icmp")
+  |> filter(fn: (r) => r["host"] == "{host}")
+  |> filter(fn: (r) => r._field == "packet_loss_pct")
+  |> keep(columns: ["_time", "_value"])
+  |> sort(columns: ["_time"])
+""")
+
+    def _q_alive():
+        return run_query(f"""
+from(bucket: "{bucket}")
+  |> range(start: -{time_range})
+  |> filter(fn: (r) => r._measurement == "icmp")
+  |> filter(fn: (r) => r["host"] == "{host}")
+  |> filter(fn: (r) => r._field == "is_alive")
+  |> keep(columns: ["_time", "_value"])
+""")
+
+    def _q_anomalies():
+        return run_query(f"""
+from(bucket: "{bucket}")
+  |> range(start: -{time_range})
+  |> filter(fn: (r) => r._measurement == "anomaly")
+  |> filter(fn: (r) => r["device"] == "{device_id}")
+  |> pivot(rowKey: ["_time"], columnKey: ["_field"], valueColumn: "_value")
+  |> sort(columns: ["_time"], desc: true)
+""")
+
+    def _q_baseline():
+        return run_query(f"""
+from(bucket: "{bucket}")
+  |> range(start: -7d)
+  |> filter(fn: (r) => r._measurement == "icmp")
+  |> filter(fn: (r) => r["host"] == "{host}")
+  |> filter(fn: (r) => r._field == "latency_ms")
+  |> mean()
+""")
+
+    with ThreadPoolExecutor(max_workers=5) as pool:
+        futs = [
+            pool.submit(_q_latency),
+            pool.submit(_q_packet_loss),
+            pool.submit(_q_alive),
+            pool.submit(_q_anomalies),
+            pool.submit(_q_baseline),
+        ]
+        lat_rows, pl_rows, alive_rows, anomaly_rows, baseline_rows = [f.result() for f in futs]
+
+    lat_vals = [r["_value"] for r in lat_rows if r.get("_value") is not None]
+    pl_vals = [r["_value"] for r in pl_rows if r.get("_value") is not None]
+
+    avg_lat = round(sum(lat_vals) / len(lat_vals), 2) if lat_vals else None
+    max_lat = round(max(lat_vals), 2) if lat_vals else None
+    min_lat = round(min(lat_vals), 2) if lat_vals else None
+    pl_avg = round(sum(pl_vals) / len(pl_vals), 2) if pl_vals else None
+
+    total_checks = len(alive_rows)
+    checks_up = sum(
+        1 for r in alive_rows
+        if r.get("_value") is not None and float(r["_value"]) > 0.5
+    )
+    uptime_pct = round((checks_up / total_checks) * 100, 2) if total_checks > 0 else None
+
+    baseline_avg = baseline_rows[0].get("_value") if baseline_rows else None
+    if avg_lat is not None and baseline_avg is not None and baseline_avg > 0:
+        deviation_pct = round(((avg_lat - baseline_avg) / baseline_avg) * 100, 1)
+        is_degraded = deviation_pct > 20
+    else:
+        deviation_pct = None
+        is_degraded = False
+
+    start_dt = datetime.utcnow() - _RANGE_DELTAS[time_range]
+    device_alerts = [
+        a for a in alert_engine.get_alerts()
+        if a.device == device_id and a.timestamp >= start_dt
+    ]
+
+    return {
+        "device": {
+            "id": device_id,
+            "name": device.get("name", device_id),
+            "ip": host,
+            "type": device.get("type", "unknown"),
+        },
+        "range": time_range,
+        "summary": {
+            "avg_latency_ms": avg_lat,
+            "max_latency_ms": max_lat,
+            "min_latency_ms": min_lat,
+            "packet_loss_avg": pl_avg,
+            "uptime_pct": uptime_pct,
+            "total_checks": total_checks,
+            "anomalies_count": len(anomaly_rows),
+            "alerts_count": len(device_alerts),
+        },
+        "latency_timeline": [
+            {"timestamp": str(r.get("_time", "")), "value": r.get("_value")}
+            for r in lat_rows
+        ],
+        "packet_loss_timeline": [
+            {"timestamp": str(r.get("_time", "")), "value": r.get("_value")}
+            for r in pl_rows
+        ],
+        "alerts_in_range": [
+            {
+                "message": a.message,
+                "severity": a.severity.value,
+                "timestamp": a.timestamp.isoformat() + "Z",
+            }
+            for a in device_alerts
+        ],
+        "anomalies_in_range": [
+            {
+                "metric": r.get("metric", ""),
+                "confidence": r.get("confidence"),
+                "value": r.get("value"),
+                "timestamp": str(r.get("_time", "")),
+            }
+            for r in anomaly_rows
+        ],
+        "baseline_comparison": {
+            "current_avg_latency": avg_lat,
+            "baseline_avg_latency": round(baseline_avg, 2) if baseline_avg is not None else None,
+            "deviation_pct": deviation_pct,
+            "is_degraded": is_degraded,
+        },
+    }
+
+
+def _build_html_report(device: dict, time_range: str, diag: dict) -> str:
+    dev = diag["device"]
+    s = diag["summary"]
+    bc = diag["baseline_comparison"]
+    now_str = datetime.utcnow().strftime("%Y-%m-%d %H:%M UTC")
+
+    dev_name = _html.escape(dev.get("name", "Unknown"))
+    dev_ip = _html.escape(dev.get("ip", "—"))
+    dev_type = _html.escape(dev.get("type", "—"))
+
+    def _fv(v, unit=""):
+        return f"{v}{unit}" if v is not None else "—"
+
+    dev_pct = bc.get("deviation_pct")
+    if dev_pct is None:
+        bc_status = '<span class="badge">N/A</span>'
+    elif abs(dev_pct) > 50:
+        bc_status = '<span class="badge badge-red">Severely Degraded</span>'
+    elif abs(dev_pct) > 20:
+        bc_status = '<span class="badge badge-yellow">Degraded</span>'
+    else:
+        bc_status = '<span class="badge badge-green">Normal</span>'
+
+    def _fmt_ts(ts_str: str) -> str:
+        try:
+            return str(ts_str)[:19].replace("T", " ")
+        except Exception:
+            return str(ts_str)
+
+    alerts = diag.get("alerts_in_range", [])
+    if alerts:
+        alert_rows = ""
+        for a in alerts:
+            sev = a["severity"]
+            cls = "badge-red" if sev == "CRITICAL" else "badge-yellow"
+            alert_rows += (
+                f'<tr><td><span class="badge {cls}">{_html.escape(sev)}</span></td>'
+                f'<td>{_html.escape(a.get("message",""))}</td>'
+                f'<td class="mono">{_fmt_ts(a.get("timestamp",""))}</td></tr>'
+            )
+    else:
+        alert_rows = '<tr><td colspan="3" style="color:#4ade80;text-align:center;padding:16px">None during this period</td></tr>'
+
+    anomalies = diag.get("anomalies_in_range", [])
+    if anomalies:
+        anomaly_rows = ""
+        for a in anomalies:
+            conf = a.get("confidence")
+            val = a.get("value")
+            anomaly_rows += (
+                f'<tr><td>{_html.escape(str(a.get("metric","")))} </td>'
+                f'<td>{f"{conf*100:.0f}%" if conf is not None else "—"}</td>'
+                f'<td>{f"{val:.2f}" if val is not None else "—"}</td>'
+                f'<td class="mono">{_fmt_ts(a.get("timestamp",""))}</td></tr>'
+            )
+    else:
+        anomaly_rows = '<tr><td colspan="4" style="color:#4ade80;text-align:center;padding:16px">None during this period</td></tr>'
+
+    lat_timeline = diag.get("latency_timeline", [])
+    lat_slice = lat_timeline[-50:]
+    if lat_slice:
+        def _lat_row(r):
+            ts_cell = _fmt_ts(r.get("timestamp", ""))
+            v = r.get("value")
+            val_cell = f"{v:.2f} ms" if v is not None else "—"
+            return f'<tr><td class="mono">{ts_cell}</td><td>{val_cell}</td></tr>'
+
+        lat_rows = "".join(_lat_row(r) for r in lat_slice)
+        lat_heading = f"Latency Data (Last {len(lat_slice)} of {len(lat_timeline)} points)"
+    else:
+        lat_rows = '<tr><td colspan="2" style="color:#64748b;text-align:center;padding:16px">No latency data available</td></tr>'
+        lat_heading = "Latency Data"
+
+    dev_pct_str = f"{dev_pct}%" if dev_pct is not None else "—"
+
+    return f"""<!DOCTYPE html>
+<html lang="en">
+<head>
+  <meta charset="UTF-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1.0">
+  <title>Apex Monitor — Diagnostic Report — {dev_name}</title>
+  <style>{_REPORT_CSS}</style>
+</head>
+<body>
+<div class="page">
+  <header>
+    <h1>Apex Monitor — Diagnostic Report</h1>
+    <p class="meta">Device: <strong style="color:#e2e8f0">{dev_name}</strong> &nbsp;·&nbsp; IP: <strong style="color:#e2e8f0">{dev_ip}</strong> &nbsp;·&nbsp; Type: {dev_type}</p>
+    <p class="meta">Time range: <strong style="color:#e2e8f0">Last {_html.escape(time_range)}</strong> &nbsp;·&nbsp; Generated: {now_str}</p>
+  </header>
+
+  <h2>Summary Statistics</h2>
+  <div class="stat-grid">
+    <div class="stat"><p class="stat-label">Avg Latency</p><p class="stat-value">{_fv(s.get("avg_latency_ms"), " ms")}</p></div>
+    <div class="stat"><p class="stat-label">Max Latency</p><p class="stat-value">{_fv(s.get("max_latency_ms"), " ms")}</p></div>
+    <div class="stat"><p class="stat-label">Min Latency</p><p class="stat-value">{_fv(s.get("min_latency_ms"), " ms")}</p></div>
+    <div class="stat"><p class="stat-label">Uptime</p><p class="stat-value">{_fv(s.get("uptime_pct"), "%")}</p></div>
+    <div class="stat"><p class="stat-label">Packet Loss Avg</p><p class="stat-value">{_fv(s.get("packet_loss_avg"), "%")}</p></div>
+    <div class="stat"><p class="stat-label">Total Checks</p><p class="stat-value">{s.get("total_checks", 0)}</p></div>
+  </div>
+
+  <h2>Baseline Comparison (7-Day)</h2>
+  <div class="card">
+    <table>
+      <tr><th>Metric</th><th>Value</th></tr>
+      <tr><td>Current Avg Latency</td><td>{_fv(bc.get("current_avg_latency"), " ms")}</td></tr>
+      <tr><td>7-Day Baseline Avg</td><td>{_fv(bc.get("baseline_avg_latency"), " ms")}</td></tr>
+      <tr><td>Deviation</td><td>{dev_pct_str}</td></tr>
+      <tr><td>Status</td><td>{bc_status}</td></tr>
+    </table>
+  </div>
+
+  <h2>Alerts During Period ({len(alerts)})</h2>
+  <div class="card">
+    <table>
+      <thead><tr><th>Severity</th><th>Message</th><th>Time</th></tr></thead>
+      <tbody>{alert_rows}</tbody>
+    </table>
+  </div>
+
+  <h2>Anomalies During Period ({len(anomalies)})</h2>
+  <div class="card">
+    <table>
+      <thead><tr><th>Metric</th><th>Confidence</th><th>Value</th><th>Time</th></tr></thead>
+      <tbody>{anomaly_rows}</tbody>
+    </table>
+  </div>
+
+  <h2>{_html.escape(lat_heading)}</h2>
+  <div class="card">
+    <table>
+      <thead><tr><th>Timestamp</th><th>Latency</th></tr></thead>
+      <tbody>{lat_rows}</tbody>
+    </table>
+  </div>
+
+  <footer>Generated by Apex Monitor — Confidential</footer>
+</div>
+</body>
+</html>"""
 
 
 def _alert_to_dict(alert) -> dict:
@@ -244,3 +567,90 @@ def get_notification_count():
         "unread": alert_engine.get_unread_count(),
         "total": len(alert_engine.get_alerts()),
     }
+
+
+# ── Diagnostic endpoints ────────────────────────────────────────────────────
+# /diagnostic/correlation must be registered before /diagnostic/{device_id}
+# so FastAPI doesn't match the literal segment "correlation" as a device_id.
+
+@router.get("/diagnostic/correlation")
+def get_diagnostic_correlation(
+    time_range: str = Query(default="6h", alias="range"),
+):
+    if time_range not in _ALLOWED_RANGES:
+        raise HTTPException(
+            status_code=400,
+            detail=f"range must be one of: {', '.join(sorted(_ALLOWED_RANGES))}",
+        )
+    devices = load_config().get("devices", [])
+    bucket = os.environ.get("INFLUXDB_BUCKET", "")
+
+    def _fetch(device: dict) -> dict:
+        host = device["ip"]
+        name = device.get("name", host)
+        rows = run_query(f"""
+from(bucket: "{bucket}")
+  |> range(start: -{time_range})
+  |> filter(fn: (r) => r._measurement == "icmp")
+  |> filter(fn: (r) => r["host"] == "{host}")
+  |> filter(fn: (r) => r._field == "latency_ms")
+  |> keep(columns: ["_time", "_value"])
+  |> sort(columns: ["_time"])
+""")
+        return {
+            "device_name": name,
+            "latency_timeline": [
+                {"timestamp": str(r.get("_time", "")), "value": r.get("_value")}
+                for r in rows
+            ],
+        }
+
+    with ThreadPoolExecutor(max_workers=min(len(devices), 10)) as pool:
+        results = list(pool.map(_fetch, devices))
+
+    return {"range": time_range, "devices": results}
+
+
+@router.get("/diagnostic/{device_id}/report")
+def get_diagnostic_report(
+    device_id: str,
+    time_range: str = Query(default="6h", alias="range"),
+):
+    if time_range not in _ALLOWED_RANGES:
+        raise HTTPException(
+            status_code=400,
+            detail=f"range must be one of: {', '.join(sorted(_ALLOWED_RANGES))}",
+        )
+    devices = load_config().get("devices", [])
+    device = next((d for d in devices if d["name"] == device_id), None)
+    if device is None:
+        raise HTTPException(status_code=404, detail="Device not found")
+
+    diag = _get_diagnostic_data(device, device_id, time_range)
+    html_content = _build_html_report(device, time_range, diag)
+    safe_name = "".join(c if c.isalnum() or c in "-_" else "_" for c in device_id)
+    date_str = datetime.utcnow().strftime("%Y%m%d")
+    filename = f"apex-report-{safe_name}-{date_str}.html"
+    return Response(
+        content=html_content,
+        media_type="text/html",
+        headers={"Content-Disposition": f'attachment; filename="{filename}"'},
+    )
+
+
+@router.get("/diagnostic/{device_id}")
+def get_diagnostic(
+    device_id: str,
+    time_range: str = Query(default="6h", alias="range"),
+):
+    if time_range not in _ALLOWED_RANGES:
+        raise HTTPException(
+            status_code=400,
+            detail=f"range must be one of: {', '.join(sorted(_ALLOWED_RANGES))}",
+        )
+    devices = load_config().get("devices", [])
+    device = next((d for d in devices if d["name"] == device_id), None)
+    if device is None:
+        raise HTTPException(status_code=404, detail="Device not found")
+
+    return _get_diagnostic_data(device, device_id, time_range)
