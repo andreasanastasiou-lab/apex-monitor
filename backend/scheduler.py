@@ -3,6 +3,7 @@ import logging
 from apscheduler.schedulers.background import BackgroundScheduler
 
 from ai.anomaly import detect_anomaly, train_baseline
+from alerts.engine import alert_engine
 from config import load_config
 from db.influx import write_metric
 from monitors.icmp import ping_device
@@ -15,6 +16,7 @@ _scheduler = BackgroundScheduler()
 
 def _run_ping(host: str, name: str) -> None:
     result = ping_device(host)
+    alert_engine.process_ping_result(name, result)
 
     latency = result.get("latency_ms")
     if result.get("is_alive") and latency is not None:
@@ -33,10 +35,14 @@ def _run_ping(host: str, name: str) -> None:
                 "Anomaly — %s latency_ms=%.1f confidence=%.2f",
                 name, latency, anomaly["confidence"],
             )
+            alert_engine.process_anomaly(name, "latency_ms", anomaly)
+
+    alert_engine.correlate_alerts()
 
 
 def _run_port_check(host: str, port: int, name: str) -> None:
     result = check_port(host, port)
+    alert_engine.process_port_result(name, port, result)
 
     response_time = result.get("response_time_ms")
     if result.get("is_open") and response_time is not None:
@@ -55,6 +61,9 @@ def _run_port_check(host: str, port: int, name: str) -> None:
                 "Anomaly — %s port %d response_time_ms=%.1f confidence=%.2f",
                 name, port, response_time, anomaly["confidence"],
             )
+            alert_engine.process_anomaly(name, "response_time_ms", anomaly)
+
+    alert_engine.correlate_alerts()
 
 
 def _retrain_all() -> None:

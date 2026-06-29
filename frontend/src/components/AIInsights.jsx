@@ -74,16 +74,25 @@ function DeviceStatusCard({ device, status, anomaliesForDevice }) {
 export default function AIInsights() {
   const [anomalies, setAnomalies] = useState([])
   const [deviceStatuses, setDeviceStatuses] = useState([])
+  const [criticalAlerts, setCriticalAlerts] = useState([])
   const [loading, setLoading] = useState(true)
 
   useEffect(() => {
     const fetchAll = async () => {
       try {
-        const [devicesRes, anomaliesRes] = await Promise.all([
+        const [devicesRes, anomaliesRes, notificationsRes] = await Promise.all([
           axios.get('/api/devices'),
           axios.get('/api/anomalies'),
+          axios.get('/api/notifications?unread_only=false').catch(() => ({ data: [] })),
         ])
         setAnomalies(anomaliesRes.data)
+
+        const cutoff = Date.now() - 24 * 60 * 60 * 1000
+        setCriticalAlerts(
+          notificationsRes.data.filter(
+            (n) => n.severity === 'CRITICAL' && new Date(n.timestamp).getTime() >= cutoff
+          )
+        )
 
         const statuses = await Promise.all(
           devicesRes.data.map(async (device) => {
@@ -112,6 +121,42 @@ export default function AIInsights() {
 
   return (
     <div className="max-w-7xl mx-auto px-4 sm:px-6 py-6">
+      {/* Security Alerts */}
+      <section className="mb-10">
+        <h2 className="text-sm font-semibold text-gray-400 uppercase tracking-wider mb-3">
+          Security Alerts — Last 24h
+        </h2>
+        {loading ? (
+          <p className="text-sm text-gray-500">Loading…</p>
+        ) : criticalAlerts.length === 0 ? (
+          <div className="bg-gray-800 border border-gray-700 rounded-xl px-5 py-6 text-center">
+            <p className="text-green-400 font-medium">No critical alerts in the last 24 hours</p>
+          </div>
+        ) : (
+          <div>
+            <p className="text-sm text-red-400 font-medium mb-2">
+              {criticalAlerts.length} critical alert{criticalAlerts.length !== 1 ? 's' : ''} detected
+            </p>
+            <div className="space-y-2">
+              {criticalAlerts.map((a) => (
+                <div
+                  key={a.id}
+                  className="border border-red-700/60 bg-red-900/20 rounded-lg px-4 py-3 flex items-center justify-between gap-4"
+                >
+                  <div className="min-w-0">
+                    <span className="font-mono text-sm text-gray-200">{a.device}</span>
+                    <p className="text-xs text-gray-400 mt-0.5">{a.message}</p>
+                  </div>
+                  <p className="text-xs text-gray-500 flex-shrink-0">
+                    {new Date(a.timestamp).toLocaleTimeString()}
+                  </p>
+                </div>
+              ))}
+            </div>
+          </div>
+        )}
+      </section>
+
       {/* Anomaly Timeline */}
       <section className="mb-10">
         <h2 className="text-sm font-semibold text-gray-400 uppercase tracking-wider mb-3">

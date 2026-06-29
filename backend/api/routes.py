@@ -4,6 +4,7 @@ from concurrent.futures import ThreadPoolExecutor
 from fastapi import APIRouter, HTTPException, Query
 
 from ai.anomaly import get_anomaly_status
+from alerts.engine import alert_engine
 from config import load_config
 from db.influx import run_query
 from monitors.icmp import ping_device
@@ -16,6 +17,19 @@ _ALLOWED_RANGES = {"1h", "6h", "24h", "7d"}
 
 # Latency above this threshold (ms) on a reachable host reports WARNING.
 _LATENCY_WARNING_MS = 100.0
+
+
+def _alert_to_dict(alert) -> dict:
+    return {
+        "id": alert.id,
+        "device": alert.device,
+        "metric": alert.metric,
+        "message": alert.message,
+        "severity": alert.severity.value,
+        "timestamp": alert.timestamp.isoformat() + "Z",
+        "is_read": alert.is_read,
+        "value": alert.value,
+    }
 
 
 @router.get("/health")
@@ -207,3 +221,26 @@ def get_device_anomaly_status(device_id: str):
         raise HTTPException(status_code=404, detail="Device not found")
 
     return get_anomaly_status(device_id)
+
+
+@router.get("/notifications")
+def get_notifications(unread_only: bool = Query(default=False)):
+    return [_alert_to_dict(a) for a in alert_engine.get_alerts(unread_only=unread_only)]
+
+
+@router.post("/notifications/{alert_id}/read")
+def mark_notification_read(alert_id: str):
+    return {"success": alert_engine.mark_read(alert_id)}
+
+
+@router.post("/notifications/read-all")
+def mark_all_notifications_read():
+    return {"success": alert_engine.mark_all_read()}
+
+
+@router.get("/notifications/count")
+def get_notification_count():
+    return {
+        "unread": alert_engine.get_unread_count(),
+        "total": len(alert_engine.get_alerts()),
+    }

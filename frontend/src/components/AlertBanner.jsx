@@ -1,27 +1,31 @@
-import React, { useEffect, useState } from 'react'
 import axios from 'axios'
+import React, { useEffect, useState } from 'react'
 
 export default function AlertBanner() {
   const [alerts, setAlerts] = useState([])
   const [dismissedCount, setDismissedCount] = useState(null)
 
   useEffect(() => {
-    const fetch = async () => {
+    const load = async () => {
       try {
-        const res = await axios.get('/api/alerts')
-        setAlerts(res.data)
+        const res = await axios.get('/api/notifications?unread_only=false')
+        // Banner shows unread CRITICAL and WARNING only — INFO is noise at this level
+        const active = res.data.filter(
+          (a) => !a.is_read && (a.severity === 'CRITICAL' || a.severity === 'WARNING')
+        )
+        setAlerts(active)
       } catch (err) {
-        console.error('Failed to fetch alerts:', err)
+        console.error('Failed to fetch notifications:', err)
       }
     }
-    fetch()
-    const id = setInterval(fetch, 60_000)
+    load()
+    const id = setInterval(load, 60_000)
     return () => clearInterval(id)
   }, [])
 
   if (alerts.length === 0 || dismissedCount === alerts.length) return null
 
-  const hasCritical = alerts.some((a) => a.severity === 'critical')
+  const hasCritical = alerts.some((a) => a.severity === 'CRITICAL')
   const bannerCls = hasCritical
     ? 'bg-red-900/80 border-red-600'
     : 'bg-yellow-800/80 border-yellow-500'
@@ -35,12 +39,11 @@ export default function AlertBanner() {
           {alerts.length !== 1 ? 's' : ''}
         </p>
         <ul className="mt-1 space-y-0.5">
-          {alerts.slice(0, 5).map((a, i) => (
-            <li key={i} className="text-xs text-gray-300">
+          {alerts.slice(0, 5).map((a) => (
+            <li key={a.id} className="text-xs text-gray-300">
               <span className="font-mono">{a.device}</span>
               {' — '}
-              {a.metric}
-              {a.port != null ? ` (port ${a.port})` : ''}
+              {a.message}
               {' at '}
               {new Date(a.timestamp).toLocaleTimeString()}
             </li>

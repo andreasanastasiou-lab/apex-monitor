@@ -1,6 +1,7 @@
 import axios from 'axios'
 import React, { useEffect, useState } from 'react'
 import DeviceCard from './DeviceCard'
+import NotificationPanel from './NotificationPanel'
 
 function StatCard({ label, value, cls }) {
   return (
@@ -29,10 +30,12 @@ function SummaryBar({ devices }) {
 }
 
 export default function Dashboard() {
-  const [devices, setDevices]       = useState([])
-  const [loading, setLoading]       = useState(true)
-  const [error, setError]           = useState(null)
-  const [lastRefresh, setLastRefresh] = useState(null)
+  const [devices, setDevices]           = useState([])
+  const [loading, setLoading]           = useState(true)
+  const [error, setError]               = useState(null)
+  const [lastRefresh, setLastRefresh]   = useState(null)
+  const [unreadCount, setUnreadCount]   = useState(0)
+  const [panelOpen, setPanelOpen]       = useState(false)
 
   useEffect(() => {
     const load = async () => {
@@ -54,24 +57,61 @@ export default function Dashboard() {
     return () => clearInterval(id)
   }, [])
 
+  useEffect(() => {
+    const fetchCount = async () => {
+      try {
+        const res = await axios.get('/api/notifications/count')
+        setUnreadCount(res.data.unread)
+      } catch {
+        // notification count is non-critical; ignore failures silently
+      }
+    }
+
+    fetchCount()
+    const id = setInterval(fetchCount, 30_000)
+    return () => clearInterval(id)
+  }, [])
+
   return (
     <div className="max-w-7xl mx-auto px-4 sm:px-6 py-6">
+      <NotificationPanel isOpen={panelOpen} onClose={() => setPanelOpen(false)} />
+
       {/* Header */}
       <header className="flex items-center justify-between mb-8">
         <div>
           <h1 className="text-2xl font-bold text-white tracking-tight">Apex Monitor</h1>
           <p className="text-sm text-gray-400 mt-0.5">Network visibility dashboard</p>
         </div>
-        <div className="text-right text-xs text-gray-500">
-          {lastRefresh ? (
-            <>
-              <span>Last refresh</span>
-              <br />
-              <span className="font-mono text-gray-400">{lastRefresh.toLocaleTimeString()}</span>
-            </>
-          ) : (
-            <span>Connecting…</span>
-          )}
+        <div className="flex items-center gap-4">
+          {/* Notification bell */}
+          <button
+            onClick={() => setPanelOpen(true)}
+            className="relative p-2 text-gray-400 hover:text-white transition-colors"
+            aria-label="Open notifications"
+          >
+            <svg width="20" height="20" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2" strokeLinecap="round" strokeLinejoin="round">
+              <path d="M18 8A6 6 0 0 0 6 8c0 7-3 9-3 9h18s-3-2-3-9" />
+              <path d="M13.73 21a2 2 0 0 1-3.46 0" />
+            </svg>
+            {unreadCount > 0 && (
+              <span className="absolute -top-0.5 -right-0.5 bg-red-500 text-white text-xs rounded-full min-w-[18px] h-[18px] flex items-center justify-center px-1 font-medium leading-none">
+                {unreadCount > 99 ? '99+' : unreadCount}
+              </span>
+            )}
+          </button>
+
+          {/* Last refresh */}
+          <div className="text-right text-xs text-gray-500">
+            {lastRefresh ? (
+              <>
+                <span>Last refresh</span>
+                <br />
+                <span className="font-mono text-gray-400">{lastRefresh.toLocaleTimeString()}</span>
+              </>
+            ) : (
+              <span>Connecting…</span>
+            )}
+          </div>
         </div>
       </header>
 
